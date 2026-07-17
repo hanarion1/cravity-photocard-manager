@@ -838,6 +838,7 @@ tbody tr:hover{background:var(--pink-pale);}
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script>
 (function(){
 
@@ -885,14 +886,51 @@ function fuzzyMatch(haystack, needle){
   return String(haystack||'').toLowerCase().includes(String(needle).toLowerCase());
 }
 
+/* ============ SUPABASE CONFIG ============ */
+/* 請填入你自己 Supabase 專案的資訊（Project Settings → API）：
+   1. SUPABASE_URL   → "Project URL"
+   2. SUPABASE_ANON_KEY → "anon public" key
+   同時請先到 Supabase 的 SQL Editor 執行建表 SQL（見交付說明），
+   否則系統會自動退回原本的本機儲存方式，資料不會永久保存。 */
+const SUPABASE_URL = 'https://YOUR-PROJECT-REF.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';
+let sbClient = null;
+let hasSupabase = false;
+try{
+  if(window.supabase && typeof window.supabase.createClient === 'function' &&
+     SUPABASE_URL.indexOf('YOUR-PROJECT-REF') === -1 && SUPABASE_ANON_KEY.indexOf('YOUR-ANON-PUBLIC-KEY') === -1){
+    sbClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    hasSupabase = true;
+  }
+}catch(e){ console.error('Supabase 初始化失敗', e); hasSupabase = false; }
+
 /* ============ STORAGE ============ */
-/* Uses Claude's built-in storage when this file is viewed inside a Claude
-   artifact panel (window.storage). When opened as a standalone file in a
-   normal browser — e.g. downloaded and double-clicked, or self-hosted —
-   window.storage won't exist, so it automatically falls back to the
-   browser's own localStorage, which works perfectly in that context. */
+/* 資料現在永久儲存在 Supabase Database。
+   每一個資料分類（卡款、購入/驗收、倉庫/留言、訂單、操作紀錄、資料設定）
+   各自對應一張 Supabase 資料表，見交付說明中的建表 SQL。
+   若 Supabase 尚未設定或連線失敗，會自動退回 Claude 內建的 window.storage，
+   若兩者皆無，最後才退回瀏覽器 localStorage（僅作為離線備援，不影響雲端為主的儲存邏輯）。 */
 const LS_PREFIX = 'cravity_';
+const KEY_TABLE_MAP = {
+  schemaVersion: 'meta_schema_version',
+  settings:      'app_settings',
+  series:        'card_series',
+  purchases:     'card_purchases',
+  pendingItems:  'warehouse_pending',
+  orders:        'card_orders',
+  logs:          'operation_logs'
+};
 async function storageGet(key){
+  if(hasSupabase){
+    try{
+      const table = KEY_TABLE_MAP[key];
+      const { data, error } = await sbClient.from(table).select('data').eq('id', 1).maybeSingle();
+      if(error) throw error;
+      return data ? JSON.stringify(data.data) : null;
+    }catch(e){
+      console.error('Supabase 讀取失敗，暫時退回本機儲存', key, e);
+    }
+  }
   if(hasStorageApi){
     try{
       const res = await window.storage.get(key, false);
@@ -903,6 +941,17 @@ async function storageGet(key){
   catch(e){ return null; }
 }
 async function storageSet(key, value){
+  if(hasSupabase){
+    try{
+      const table = KEY_TABLE_MAP[key];
+      const parsed = JSON.parse(value);
+      const { error } = await sbClient.from(table).upsert({ id: 1, data: parsed, updated_at: new Date().toISOString() });
+      if(error) throw error;
+      return true;
+    }catch(e){
+      console.error('Supabase 寫入失敗，暫時退回本機儲存', key, e);
+    }
+  }
   if(hasStorageApi){
     try{ await window.storage.set(key, value, false); return true; }
     catch(e){ console.error('storage.set failed', key, e); return false; }
